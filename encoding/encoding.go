@@ -26,6 +26,8 @@
 package encoding
 
 import (
+	"context"
+	"google.golang.org/grpc/metadata"
 	"io"
 	"strings"
 )
@@ -96,6 +98,8 @@ type Codec interface {
 
 var registeredCodecs = make(map[string]Codec)
 
+var registeredMsgWrappers = make(map[string]MessageWrapperHandler)
+
 // RegisterCodec registers the provided Codec for use with all gRPC clients and
 // servers.
 //
@@ -138,3 +142,33 @@ type MessageWrapper interface {
 // MessageWrapperHandler wraps a message before it will be encoded/decoded.
 // A new handler can be registered with the generated RegisterMessageWrapper function.
 type MessageWrapperHandler func(v interface{}) MessageWrapper
+
+// MessageWrapperFromIncomingContext returns a registered message wrapper for the given codec.
+func MessageWrapperFromIncomingContext(ctx context.Context) (wrapper MessageWrapperHandler) {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		v := md.Get("content-type")
+		if len(v) == 0 {
+			return
+		}
+		if parts := strings.Split(v[0], "+"); len(parts) == 2 {
+			codecName := parts[1]
+			wrapper, _ = registeredMsgWrappers[codecName]
+		}
+	}
+	return
+}
+
+// MessageWrapperFromCodecName returns a registered message wrapper for the specified codec.
+func MessageWrapperFromCodecName(codecName string) (wrapper MessageWrapperHandler) {
+	wrapper, _ = registeredMsgWrappers[codecName]
+	return
+}
+
+// RegisterMessageWrapper registers a message wrapper by codec name.
+func RegisterMessageWrapper(codecName string, handler MessageWrapperHandler) {
+	if _, ok := registeredMsgWrappers[codecName]; ok {
+		// todo: issue a warning
+		return
+	}
+	registeredMsgWrappers[codecName] = handler
+}
