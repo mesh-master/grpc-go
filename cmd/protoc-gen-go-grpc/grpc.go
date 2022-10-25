@@ -53,13 +53,12 @@ func (serviceGenerateHelper) formatFullMethodName(service *protogen.Service, met
 func (serviceGenerateHelper) generateClientStruct(g *protogen.GeneratedFile, clientName string) {
 	g.P("type ", unexport(clientName), " struct {")
 	g.P("cc ", grpcPackage.Ident("ClientConnInterface"))
-	g.P("codecName string")
 	g.P("}")
 	g.P()
 }
 
 func (serviceGenerateHelper) generateNewClientDefinitions(g *protogen.GeneratedFile, service *protogen.Service, clientName string) {
-	g.P("return &", unexport(clientName), "{cc, codecName}")
+	g.P("return &", unexport(clientName), "{cc}")
 }
 
 func (serviceGenerateHelper) generateUnimplementedServerType(gen *protogen.Plugin, file *protogen.File, g *protogen.GeneratedFile, service *protogen.Service) {
@@ -188,7 +187,7 @@ func genService(gen *protogen.Plugin, file *protogen.File, g *protogen.Generated
 	if service.Desc.Options().(*descriptorpb.ServiceOptions).GetDeprecated() {
 		g.P(deprecationComment)
 	}
-	g.P("func New", clientName, " (cc ", grpcPackage.Ident("ClientConnInterface"), ", codecName string) ", clientName, " {")
+	g.P("func New", clientName, " (cc ", grpcPackage.Ident("ClientConnInterface"), ") ", clientName, " {")
 	helper.generateNewClientDefinitions(g, service, clientName)
 	g.P("}")
 	g.P()
@@ -287,7 +286,7 @@ func genClientMethod(gen *protogen.Plugin, file *protogen.File, g *protogen.Gene
 	if !method.Desc.IsStreamingServer() && !method.Desc.IsStreamingClient() {
 		g.P("var inw, outw interface{}")
 		g.P("out := new(", method.Output.GoIdent, ")")
-		g.P("wrapper := ", encodingPackage.Ident("MessageWrapperFromCodecName"), "(c.codecName)")
+		g.P("wrapper := ", encodingPackage.Ident("MessageWrapperFromContext"), "(ctx)")
 		g.P("if wrapper != nil {")
 		g.P("inw, outw = wrapper(in), wrapper(out)")
 		g.P("} else {")

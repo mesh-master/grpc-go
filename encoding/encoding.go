@@ -98,7 +98,12 @@ type Codec interface {
 
 var registeredCodecs = make(map[string]Codec)
 
-var registeredMsgWrappers = make(map[string]MessageWrapperHandler)
+type messageWrapperKeyType struct{}
+
+var (
+	messageWrapperKey     messageWrapperKeyType
+	registeredMsgWrappers = make(map[string]MessageWrapperHandler)
+)
 
 // RegisterCodec registers the provided Codec for use with all gRPC clients and
 // servers.
@@ -151,24 +156,28 @@ func MessageWrapperFromIncomingContext(ctx context.Context) (wrapper MessageWrap
 			return
 		}
 		if parts := strings.Split(v[0], "+"); len(parts) == 2 {
-			codecName := parts[1]
-			wrapper, _ = registeredMsgWrappers[codecName]
+			contentSubtype := parts[1]
+			wrapper, _ = registeredMsgWrappers[contentSubtype]
 		}
 	}
 	return
 }
 
-// MessageWrapperFromCodecName returns a registered message wrapper for the specified codec.
-func MessageWrapperFromCodecName(codecName string) (wrapper MessageWrapperHandler) {
-	wrapper, _ = registeredMsgWrappers[codecName]
-	return
+func ContextWithMessageWrapper(ctx context.Context, wrapper MessageWrapperHandler) context.Context {
+	return context.WithValue(ctx, messageWrapperKey, wrapper)
+}
+
+// MessageWrapperFromContext returns a wrapper attached to client call context.
+func MessageWrapperFromContext(ctx context.Context) (wrapper MessageWrapperHandler) {
+	value := ctx.Value(messageWrapperKey)
+	if value != nil {
+		return value.(MessageWrapperHandler)
+	} else {
+		return nil
+	}
 }
 
 // RegisterMessageWrapper registers a message wrapper by codec name.
 func RegisterMessageWrapper(codecName string, handler MessageWrapperHandler) {
-	if _, ok := registeredMsgWrappers[codecName]; ok {
-		// todo: issue a warning
-		return
-	}
 	registeredMsgWrappers[codecName] = handler
 }
