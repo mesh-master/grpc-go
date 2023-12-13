@@ -29,14 +29,16 @@ import (
 )
 
 const (
-	contextPackage = protogen.GoImportPath("context")
-	grpcPackage    = protogen.GoImportPath("google.golang.org/grpc")
-	codesPackage   = protogen.GoImportPath("google.golang.org/grpc/codes")
-	statusPackage  = protogen.GoImportPath("google.golang.org/grpc/status")
+	contextPackage  = protogen.GoImportPath("context")
+	grpcPackage     = protogen.GoImportPath("google.golang.org/grpc")
+	codesPackage    = protogen.GoImportPath("google.golang.org/grpc/codes")
+	statusPackage   = protogen.GoImportPath("google.golang.org/grpc/status")
+	encodingPackage = protogen.GoImportPath("google.golang.org/grpc/encoding")
 )
 
 type serviceGenerateHelperInterface interface {
 	formatFullMethodSymbol(service *protogen.Service, method *protogen.Method) string
+	formatFullMethodName(service *protogen.Service, method *protogen.Method) string
 	genFullMethods(g *protogen.GeneratedFile, service *protogen.Service)
 	generateClientStruct(g *protogen.GeneratedFile, clientName string)
 	generateNewClientDefinitions(g *protogen.GeneratedFile, service *protogen.Service, clientName string)
@@ -46,6 +48,10 @@ type serviceGenerateHelperInterface interface {
 }
 
 type serviceGenerateHelper struct{}
+
+func (serviceGenerateHelper) formatFullMethodName(service *protogen.Service, method *protogen.Method) string {
+	return fmt.Sprintf("/%s/%s", service.Desc.FullName(), method.Desc.Name())
+}
 
 func (serviceGenerateHelper) formatFullMethodSymbol(service *protogen.Service, method *protogen.Method) string {
 	return fmt.Sprintf("%s_%s_FullMethodName", service.GoName, method.GoName)
@@ -216,6 +222,7 @@ func genService(gen *protogen.Plugin, file *protogen.File, g *protogen.Generated
 	// Copy comments from proto file.
 	genServiceComments(g, service)
 
+	// Client interface.
 	if service.Desc.Options().(*descriptorpb.ServiceOptions).GetDeprecated() {
 		g.P("//")
 		g.P(deprecationComment)
@@ -356,20 +363,31 @@ func clientStreamInterface(g *protogen.GeneratedFile, method *protogen.Method) s
 
 func genClientMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.GeneratedFile, method *protogen.Method, index int) {
 	service := method.Parent
-	fmSymbol := helper.formatFullMethodSymbol(service, method)
-
+	sname := helper.formatFullMethodName(service, method)
 	if method.Desc.Options().(*descriptorpb.MethodOptions).GetDeprecated() {
 		g.P(deprecationComment)
 	}
 	g.P("func (c *", unexport(service.GoName), "Client) ", clientSignature(g, method), "{")
 	g.P("cOpts := append([]", grpcPackage.Ident("CallOption"), "{", grpcPackage.Ident("StaticMethod()"), "}, opts...)")
 	if !method.Desc.IsStreamingServer() && !method.Desc.IsStreamingClient() {
-		g.P("out := new(", method.Output.GoIdent, ")")
-		g.P(`err := c.cc.Invoke(ctx, `, fmSymbol, `, in, out, cOpts...)`)
-		g.P("if err != nil { return nil, err }")
-		g.P("return out, nil")
+		g.P("var (")
+		g.P("req, resp any")
+		g.P("unwrap func() any")
+		g.P(")")
+		g.P("if wrapper := ", encodingPackage.Ident("MessageWrapperFromContext"), "(ctx); wrapper != nil {")
+		g.P("req, resp = wrapper(in), wrapper(new(", method.Output.GoIdent, "))")
+		g.P("unwrap = func() any { return resp.(", encodingPackage.Ident("WrappedMessage"), ").Unwrap() }")
+		g.P("} else {")
+		g.P("req, resp = in, new(", method.Output.GoIdent, ")")
+		g.P("unwrap = func() any { return resp }")
 		g.P("}")
-		g.P()
+		g.P(`err := c.cc.Invoke(ctx, "`, sname, `", req, resp, cOpts...)`)
+		g.P("if err != nil {")
+		g.P("return nil, err")
+		g.P("}")
+		g.P("return unwrap().(*", method.Output.GoIdent, "), nil")
+		g.P("}")
+		g.P("")
 		return
 	}
 
@@ -380,7 +398,7 @@ func genClientMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.Generated
 	}
 
 	serviceDescVar := service.GoName + "_ServiceDesc"
-	g.P("stream, err := c.cc.NewStream(ctx, &", serviceDescVar, ".Streams[", index, `], `, fmSymbol, `, cOpts...)`)
+	g.P("stream, err := c.cc.NewStream(ctx, &", serviceDescVar, ".Streams[", index, `], "`, sname, `", cOpts...)`)
 	g.P("if err != nil { return nil, err }")
 	g.P("x := &", streamImpl, "{ClientStream: stream}")
 	if !method.Desc.IsStreamingClient() {
@@ -405,6 +423,7 @@ func genClientMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.Generated
 	genRecv := method.Desc.IsStreamingServer()
 	genCloseAndRecv := !method.Desc.IsStreamingServer()
 
+	// Stream auxiliary types and methods.
 	g.P("type ", service.GoName, "_", method.GoName, "Client interface {")
 	if genSend {
 		g.P("Send(*", method.Input.GoIdent, ") error")
@@ -528,16 +547,35 @@ func genServerMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.Generated
 
 	if !method.Desc.IsStreamingClient() && !method.Desc.IsStreamingServer() {
 		g.P("func ", hnameFuncNameFormatter(hname), "(srv interface{}, ctx ", contextPackage.Ident("Context"), ", dec func(interface{}) error, interceptor ", grpcPackage.Ident("UnaryServerInterceptor"), ") (interface{}, error) {")
-		g.P("in := new(", method.Input.GoIdent, ")")
-		g.P("if err := dec(in); err != nil { return nil, err }")
-		g.P("if interceptor == nil { return srv.(", service.GoName, "Server).", method.GoName, "(ctx, in) }")
-		g.P("info := &", grpcPackage.Ident("UnaryServerInfo"), "{")
-		g.P("Server: srv,")
-		fmSymbol := helper.formatFullMethodSymbol(service, method)
-		g.P("FullMethod: ", fmSymbol, ",")
+		g.P("var (")
+		g.P("in any")
+		g.P("unwrap func() any")
+		g.P(")")
+		g.P("wrapper := ", encodingPackage.Ident("MessageWrapperFromIncomingContext"), "(ctx)")
+		g.P("if wrapper != nil {")
+		g.P("in = wrapper(new(", method.Input.GoIdent, "))")
+		g.P("unwrap = func() any {")
+		g.P("return in.(", encodingPackage.Ident("WrappedMessage"), ").Unwrap()")
+		g.P("}")
+		g.P("} else {")
+		g.P("in = new(", method.Input.GoIdent, ")")
+		g.P("unwrap = func() any {")
+		g.P("return in")
+		g.P("}")
+		g.P("}")
+		g.P("if err := dec(in); err != nil {")
+		g.P("return nil, err")
+		g.P("}")
+		g.P("if interceptor == nil {")
+		g.P("return srv.(", service.GoName, "Server).", method.GoName, "(ctx, unwrap().(*", method.Input.GoIdent, "))")
+		g.P("}")
+		g.P("info := &grpc.UnaryServerInfo{")
+		g.P("Server:     srv,")
+		sname := helper.formatFullMethodName(service, method)
+		g.P(`FullMethod: "`, sname, `",`)
 		g.P("}")
 		g.P("handler := func(ctx ", contextPackage.Ident("Context"), ", req interface{}) (interface{}, error) {")
-		g.P("return srv.(", service.GoName, "Server).", method.GoName, "(ctx, req.(*", method.Input.GoIdent, "))")
+		g.P("return srv.(", service.GoName, "Server).", method.GoName, "(ctx, unwrap().(*", method.Input.GoIdent, "))")
 		g.P("}")
 		g.P("return interceptor(ctx, in, info, handler)")
 		g.P("}")
@@ -576,6 +614,7 @@ func genServerMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.Generated
 	genSendAndClose := !method.Desc.IsStreamingServer()
 	genRecv := method.Desc.IsStreamingClient()
 
+	// Stream auxiliary types and methods.
 	g.P("type ", service.GoName, "_", method.GoName, "Server interface {")
 	if genSend {
 		g.P("Send(*", method.Output.GoIdent, ") error")
@@ -586,6 +625,7 @@ func genServerMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.Generated
 	if genRecv {
 		g.P("Recv() (*", method.Input.GoIdent, ", error)")
 	}
+	g.P("Unwrap() ", grpcPackage.Ident("ServerStream"))
 	g.P(grpcPackage.Ident("ServerStream"))
 	g.P("}")
 	g.P()
@@ -615,6 +655,11 @@ func genServerMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.Generated
 		g.P("}")
 		g.P()
 	}
+
+	g.P("func (x *", streamImpl, ") Unwrap() ", grpcPackage.Ident("ServerStream"), " {")
+	g.P("return x.ServerStream")
+	g.P("}")
+	g.P()
 
 	return hname
 }

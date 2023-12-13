@@ -26,6 +26,8 @@
 package encoding
 
 import (
+	"context"
+	"google.golang.org/grpc/metadata"
 	"io"
 	"strings"
 
@@ -96,6 +98,13 @@ type Codec interface {
 
 var registeredCodecs = make(map[string]any)
 
+type messageWrapperKeyType struct{}
+
+var (
+	messageWrapperKey     messageWrapperKeyType
+	registeredMsgWrappers = make(map[string]MessageWrapperHandler)
+)
+
 // RegisterCodec registers the provided Codec for use with all gRPC clients and
 // servers.
 //
@@ -128,4 +137,53 @@ func RegisterCodec(codec Codec) {
 func GetCodec(contentSubtype string) Codec {
 	c, _ := registeredCodecs[contentSubtype].(Codec)
 	return c
+}
+
+// WrappedMessage defines the interface for wrapped messages.
+type WrappedMessage interface {
+	// Unwrap returns the underlying message.
+	Unwrap() any
+}
+
+// MessageWrapperHandler wraps a message before it will be encoded/decoded.
+// A new handler can be registered with the generated RegisterMessageWrapper function.
+type MessageWrapperHandler func(v any) WrappedMessage
+
+// MessageWrapperFromIncomingContext returns a registered message wrapper for the given codec.
+func MessageWrapperFromIncomingContext(ctx context.Context) (wrapper MessageWrapperHandler) {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		v := md.Get("content-type")
+		if len(v) == 0 {
+			return
+		}
+		if parts := strings.Split(v[0], "+"); len(parts) == 2 {
+			contentSubtype := parts[1]
+			wrapper, _ = registeredMsgWrappers[contentSubtype]
+		}
+	}
+	return
+}
+
+func MessageWrapperFromCodecName(codecName string) (wrapper MessageWrapperHandler) {
+	wrapper, _ = registeredMsgWrappers[codecName]
+	return
+}
+
+func ContextWithMessageWrapper(ctx context.Context, wrapper MessageWrapperHandler) context.Context {
+	return context.WithValue(ctx, messageWrapperKey, wrapper)
+}
+
+// MessageWrapperFromContext returns a wrapper attached to client call context.
+func MessageWrapperFromContext(ctx context.Context) (wrapper MessageWrapperHandler) {
+	value := ctx.Value(messageWrapperKey)
+	if value != nil {
+		return value.(MessageWrapperHandler)
+	} else {
+		return nil
+	}
+}
+
+// RegisterMessageWrapper registers a message wrapper by codec name.
+func RegisterMessageWrapper(codecName string, handler MessageWrapperHandler) {
+	registeredMsgWrappers[codecName] = handler
 }
