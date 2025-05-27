@@ -172,6 +172,21 @@ func (cc *ClientConn) NewStream(ctx context.Context, desc *StreamDesc, method st
 	return newClientStream(ctx, desc, cc, method, opts...)
 }
 
+// NewStreamBypassInterceptors creates a new client stream without invoking any configured stream interceptors.
+// This is useful for low-level operations where interceptors would interfere with the intended behavior.
+//
+// Unlike NewStream, this method:
+//   - Ignores any StreamInterceptor set in ClientConn options
+//   - Still applies all CallOptions (both default and per-call)
+//   - Should only be used when you need complete control over the stream creation
+func (cc *ClientConn) NewStreamBypassInterceptors(ctx context.Context, desc *StreamDesc, method string, opts ...CallOption) (ClientStream, error) {
+	// Combine default and per-call options (same as NewStream)
+	opts = combine(cc.dopts.callOptions, opts)
+
+	// Skip the interceptor chain and go straight to stream creation
+	return newClientStream(ctx, desc, cc, method, opts...)
+}
+
 // NewClientStream is a wrapper for ClientConn.NewStream.
 func NewClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, method string, opts ...CallOption) (ClientStream, error) {
 	return cc.NewStream(ctx, desc, method, opts...)
